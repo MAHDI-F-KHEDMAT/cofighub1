@@ -1,0 +1,54 @@
+name: Update VLESS Subscription
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # هر ساعت، دقیقه ۰
+  workflow_dispatch:       # امکان اجرای دستی از تب Actions
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-configs
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Install Xray-core
+        run: |
+          mkdir -p "$HOME/xray-bin"
+          curl -sL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip -q xray.zip -d "$HOME/xray-bin"
+          chmod +x "$HOME/xray-bin/xray"
+          echo "$HOME/xray-bin" >> "$GITHUB_PATH"
+          "$HOME/xray-bin/xray" version
+
+      - name: Run script
+        run: python Confighub_yab_v2.py
+
+      - name: Commit updated subscription
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add sub_vless_base64.txt
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update subscription $(date -u +'%Y-%m-%d %H:%M UTC')"
+            git push
+          fi
