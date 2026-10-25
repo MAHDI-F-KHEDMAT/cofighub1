@@ -13,7 +13,7 @@ import urllib.parse
 import concurrent.futures
 from urllib.parse import urlparse, parse_qs, unquote
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # فهماندن پروتکل vless به کتابخانه استاندارد پایتون
 urllib.parse.uses_netloc.append('vless')
@@ -25,9 +25,10 @@ DAYS_BACK = 2
 CONFIG_PREFIX_NAME = "ConfigsHUB_VIP_"
 MAX_FINAL_CONFIGS = 500  # محدودیت فایل نهایی (کانفیگ‌های برتر)
 
-# مسیر فایل اجرایی Xray (اگر در PATH نیست، مسیر کامل را بدهید؛ مثلاً ./xray یا C:\\xray\\xray.exe)
+# مسیر فایل اجرایی Xray (اگر در PATH نیست، مسیر کامل را بدهید؛ مثلاً ./xray)
 XRAY_PATH = shutil.which("xray") or "./xray"
-SPEED_TEST_WORKERS = 20   # تعداد هسته‌های Xray که هم‌زمان اجرا می‌شوند
+SPEED_TEST_WORKERS = 5    # برای ترموکس کم نگه داشته شده
+TCP_TEST_WORKERS = 50     # برای ترموکس کم نگه داشته شده
 SPEED_TEST_TIMEOUT = 15   # ثانیه
 
 CHANNELS = [
@@ -50,8 +51,7 @@ def check_tcp_connection(config_url, timeout=3):
         port = parsed.port
         if not host or not port:
             return {'config': config_url, 'status': False}
-        
-        # تلاش برای برقراری ارتباط TCP با هاست و پورت کانفیگ
+
         with socket.create_connection((host, port), timeout=timeout):
             return {'config': config_url, 'status': True}
     except Exception:
@@ -59,18 +59,17 @@ def check_tcp_connection(config_url, timeout=3):
 
 def filter_tcp_alive_configs(unique_configs):
     print(f"\n{Colors.YELLOW}⚡ شروع تست اتصال TCP سریع برای {len(unique_configs)} کانفیگ...{Colors.RESET}")
-    
+
     alive_configs = []
-    
-    # تست موازی TCP با ۱۵۰ ترد همزمان (افزایش یافته برای سرعت بیشتر)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=150) as executor:
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=TCP_TEST_WORKERS) as executor:
         future_to_config = {executor.submit(check_tcp_connection, url): url for url in unique_configs}
-        
+
         for future in concurrent.futures.as_completed(future_to_config):
             result = future.result()
             if result['status']:
                 alive_configs.append(result['config'])
-                
+
     print(f"{Colors.GREEN}✅ تست TCP تمام شد. تعداد {len(alive_configs)} کانفیگ زنده و پاسخگو ماندند.{Colors.RESET}")
     return alive_configs
 
@@ -266,12 +265,18 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
             if response.status_code == 429:
                 time.sleep(15)
                 continue
-            if response.status_code != 200: break
-        except Exception: break
+            if response.status_code != 200:
+                print(f"{Colors.RED}❌ کد پاسخ: {response.status_code}{Colors.RESET}")
+                break
+        except Exception as e:
+            print(f"{Colors.RED}❌ خطای شبکه: {e}{Colors.RESET}")
+            break
 
         soup = BeautifulSoup(response.text, 'html.parser')
         messages = soup.find_all('div', class_='tgme_widget_message')
-        if not messages: break
+        if not messages:
+            print(f"{Colors.YELLOW}⚠️ پیامی در صفحه پیدا نشد.{Colors.RESET}")
+            break
 
         page_min_id = None
         for msg in messages:
@@ -282,12 +287,13 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
                     if page_min_id is None or msg_id < page_min_id: page_min_id = msg_id
                 except ValueError: pass
 
-            time_tag = msg.find('time')
+            # فقط تگ time که واقعاً ویژگی datetime دارد
+            time_tag = msg.find('time', attrs={'datetime': True})
             if not time_tag: continue
-            
+
             try:
-                msg_dt = datetime.fromisoformat(time_tag.get('datetime').replace('Z', '+00:00').split('+')[0])
-            except ValueError: continue
+                msg_dt = datetime.fromisoformat(time_tag['datetime'].replace('Z', '+00:00').split('+')[0])
+            except (ValueError, TypeError, AttributeError): continue
 
             if msg_dt < cutoff_datetime:
                 reached_old = True
@@ -299,6 +305,8 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
                 for raw_config in config_pattern.findall(msg_text):
                     if is_bulletproof_vless(raw_config):
                         channel_configs.append(raw_config)
+
+        print(f"   صفحه بررسی شد؛ تا اینجا {len(channel_configs)} کانفیگ")
 
         if reached_old or not page_min_id or page_min_id in seen_min_ids: break
         seen_min_ids.add(page_min_id)
@@ -312,9 +320,9 @@ def scrape_channel(channel_url, cutoff_datetime, session, config_pattern):
 def scrape_all_channels():
     session = requests.Session()
     session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36"})
-    cutoff_datetime = datetime.utcnow() - timedelta(days=DAYS_BACK)
+    cutoff_datetime = (datetime.now(timezone.utc) - timedelta(days=DAYS_BACK)).replace(tzinfo=None)
     config_pattern = re.compile(r'vless://[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}@[^\s\'"<>#]+')
-    
+
     all_extracted_configs = []
     for channel in CHANNELS:
         try:
@@ -327,7 +335,7 @@ def scrape_all_channels():
     if unique_configs:
         # مرحله ۱: تست اتصال TCP سریع برای حذف کانفیگ‌های مرده
         tcp_alive_configs = filter_tcp_alive_configs(unique_configs)
-        
+
         if tcp_alive_configs:
             # مرحله ۲: تست سرعت دانلود و گلچین کردن کانفیگ‌های برتر
             best_configs = filter_top_configs(tcp_alive_configs)
