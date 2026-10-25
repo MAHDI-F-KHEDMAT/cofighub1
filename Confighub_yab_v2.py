@@ -41,6 +41,17 @@ class Colors:
     YELLOW = '\033[93m'
     RESET = '\033[0m'
 
+# هر پرینت بلافاصله نمایش داده شود و زمان هم داشته باشد
+_builtin_print = print
+def print(*args, **kwargs):
+    kwargs.setdefault("flush", True)
+    _builtin_print(datetime.now().strftime("[%H:%M:%S]"), *args, **kwargs)
+
+def short(url, n=45):
+    """نمایش کوتاه‌شده‌ی کانفیگ در لاگ"""
+    p = urlparse(url)
+    return f"{p.hostname}:{p.port}" if p.hostname else url[:n]
+
 # ==========================================
 # ۱. تابع تست اتصال TCP سریع (فیلتر اولیه سلامت هاست و پورت)
 # ==========================================
